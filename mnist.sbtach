@@ -1,0 +1,89 @@
+#!/bin/bash
+set -o xtrace
+#SBATCH --output="tfospark-mnist-ri2.out"
+#SBATCH --partition=gpu
+#SBATCH --nodes=3
+#SBATCH --export=ALL
+
+module load cuda/8.0
+module load cuddd/5.0
+
+pushd ~/git-pull/finished/streaming-benchmarks/sbatch_spark_scripts/
+
+ri-spark-basic-comet.sbatch iptof y
+ssh -t -t head sudo /sbin/distribute_hosts.sh ~/myhostnames /home/javed.19/git-pull/finished/streaming-benchmarks/sbatch_spark_scripts/host_files/ib
+ri-spark-basic-comet.sbatch config_spark
+hadoop-script.sh 
+popd
+
+
+~/git-pull/finished/HiBench/hadoop-2.7.3/bin/hadoop fs -put /home/javed.19/tensorflow/ecosystem/hadoop/target/tensorflow-hadoop-1.0-SNAPSHOT.jar /
+
+
+
+~/git-pull/finished/HiBench/hadoop-2.7.3/bin/hadoop fs -put ${PYTHON_ROOT}/Python.zip /
+export PYSPARK_PYTHON=${PYTHON_ROOT}/bin/python
+export SPARK_YARN_USER_ENV="PYSPARK_PYTHON=Python/bin/python"
+export PATH=${PYTHON_ROOT}/bin/:$PATH
+export SPARK_HOME=/home/javed.19/git-pull/finished/HiBench/spark-2.0.2-bin-hadoop2.7
+export SPARK_WORKER_INSTANCES=2
+
+
+export NUM_GPU=2
+export MEMORY=$((NUM_GPU * 11))
+#unzip and put in hdfs
+${SPARK_HOME}/bin/spark-submit \
+--master yarn \
+--deploy-mode cluster \
+--num-executors $SPARK_WORKER_INSTANCES \
+--executor-memory ${MEMORY}G \
+--archives hdfs:///Python.zip#Python,mnist/mnist.zip#mnist \
+--conf spark.executorEnv.LD_LIBRARY_PATH="/usr/local/cuda/lib64" \
+--driver-library-path="/usr/local/cuda/lib64" \
+TensorFlowOnSpark/examples/mnist/mnist_data_setup.py \
+--num_gpus ${NUM_GPU} \
+--rdma \
+--output mnist/csv \
+--format csv
+
+<<comment
+
+
+
+#convert to TFRecords
+${SPARK_HOME}/bin/spark-submit \
+--master yarn \
+--deploy-mode cluster \
+--num-executors ${SPARK_WORKER_INSTANCES} \
+--executor-memory ${MEMORY}G \
+--archives hdfs:///Python.zip#Python,mnist/mnist.zip#mnist \
+--jars hdfs:///tensorflow-hadoop-1.0-SNAPSHOT.jar \
+--conf spark.executorEnv.LD_LIBRARY_PATH="/usr/local/cuda/lib64" \
+--driver-library-path="/usr/local/cuda/lib64" \
+TensorFlowOnSpark/examples/mnist/mnist_data_setup.py \
+--num_gpus ${NUM_GPU} \
+#--rdma \
+--output mnist/tfr \
+--format tfr
+
+#start training
+${SPARK_HOME}/bin/spark-submit \
+--master yarn \
+--deploy-mode cluster \
+--num-executors ${SPARK_WORKER_INSTANCES} \
+--executor-memory ${MEMORY}G \
+--py-files TensorFlowOnSpark/tfspark.zip,TensorFlowOnSpark/examples/mnist/spark/mnist_dist.py \
+--conf spark.dynamicAllocation.enabled=false \
+--conf spark.yarn.maxAppAttempts=1 \
+--archives hdfs:///Python.zip#Python \
+--conf spark.executorEnv.LD_LIBRARY_PATH="/usr/local/cuda/lib64:$JAVA_HOME/jre/lib/amd64/server" \
+--driver-library-path="/usr/local/cuda/lib64" \
+TensorFlowOnSpark/examples/mnist/spark/mnist_spark.py \
+--images mnist/csv/train/images \
+--labels mnist/csv/train/labels \
+--mode train \
+--model mnist_model \
+--num_gpus ${NUM_GPU} 
+#--rdma \
+#--tensorboard
+comment
